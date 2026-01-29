@@ -18,10 +18,10 @@ RUN cd litestream && go install ./cmd/litestream
 RUN cp $GOPATH/bin/litestream /usr/src/lt
 
 ###########
-# Builder
+# Builder - builds the application from source
 ###########
 FROM node:22-slim AS builder
-WORKDIR /usr/src/app
+WORKDIR /usr/src/monorepo
 
 # Install dependencies required for node-gyp and other build tools
 RUN apt-get update && apt-get install -y \
@@ -38,9 +38,7 @@ RUN apt-get update && apt-get install -y \
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 # Copy the entire monorepo for building
-COPY --link . /usr/src/monorepo/
-
-WORKDIR /usr/src/monorepo
+COPY --link . .
 
 # Install all dependencies and build the nocodb package
 RUN pnpm install --frozen-lockfile
@@ -51,24 +49,36 @@ RUN pnpm --filter=nocodb-sdk run build
 # Build the docker bundle (generates docker/main.js)
 RUN cd packages/nocodb && pnpm run docker:build
 
-# Now set up the production image
+###########
+# Production dependencies installer
+###########
+FROM node:22-slim AS prod-deps
 WORKDIR /usr/src/app
 
-# Copy built artifacts
+# Install dependencies required for node-gyp
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-distutils \
+    python-is-python3 \
+    make \
+    g++ \
+    libssl-dev \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install pnpm
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+
+# Copy package.json from builder
 COPY --link --from=builder /usr/src/monorepo/packages/nocodb/package.json ./package.json
-COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/main.js ./docker/main.js
-COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/start-litestream.sh /usr/src/appEntry/start.sh
-COPY --link --from=builder /usr/src/monorepo/packages/nocodb/src/public/ ./docker/public/
 
 # Configure pnpm to use hoisted node_modules for modclean compatibility
 RUN echo "node-linker=hoisted" > .npmrc
 
 # Install production dependencies, reduce node_modules size with modclean,
-# remove sqlite deps, and add execute permission to start.sh
+# and remove sqlite deps
 RUN pnpm install --prod --shamefully-hoist \
     && pnpm dlx modclean --patterns="default:*" --ignore="nc-lib-gui/**,dayjs/**,express-status-monitor/**,@azure/msal-node/dist/**,@react-email/**,@linear/**,jsdom/**,formdata-polyfill/**" --run \
-    && rm -rf ./node_modules/sqlite3/deps \
-    && chmod +x /usr/src/appEntry/start.sh
+    && rm -rf ./node_modules/sqlite3/deps
 
 ##########
 # Runner
@@ -99,9 +109,21 @@ RUN apt-get update && apt-get install -y \
 COPY --link --from=lt-builder /usr/src/lt /usr/local/bin/litestream
 COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/litestream.yml /etc/litestream.yml
 
-# Copy production code & main entry file
-COPY --link --from=builder /usr/src/app/ /usr/src/app/
-COPY --link --from=builder /usr/src/appEntry/ /usr/src/appEntry/
+# Copy production node_modules
+COPY --link --from=prod-deps /usr/src/app/node_modules ./node_modules
+
+# Copy package.json
+COPY --link --from=builder /usr/src/monorepo/packages/nocodb/package.json ./package.json
+
+# Copy built main.js bundle
+COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/main.js ./docker/main.js
+
+# Copy public assets
+COPY --link --from=builder /usr/src/monorepo/packages/nocodb/src/public/ ./docker/public/
+
+# Copy start script and make executable
+COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/start-litestream.sh /usr/src/appEntry/start.sh
+RUN chmod +x /usr/src/appEntry/start.sh
 
 EXPOSE 8080
 
