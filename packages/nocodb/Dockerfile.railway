@@ -46,6 +46,9 @@ RUN pnpm install --frozen-lockfile
 # Build nocodb-sdk first (dependency)
 RUN pnpm --filter=nocodb-sdk run build
 
+# Create a tarball of nocodb-sdk for use in prod-deps stage
+RUN cd packages/nocodb-sdk && pnpm pack && mv nocodb-sdk-*.tgz /tmp/nocodb-sdk.tgz
+
 # Build the docker bundle (generates docker/main.js)
 RUN cd packages/nocodb && pnpm run docker:build
 
@@ -71,8 +74,12 @@ RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 # Copy package.json from builder
 COPY --link --from=builder /usr/src/monorepo/packages/nocodb/package.json ./package.json
 
-# Configure pnpm to use hoisted node_modules for modclean compatibility
-RUN echo "node-linker=hoisted" > .npmrc
+# Copy the nocodb-sdk tarball
+COPY --link --from=builder /tmp/nocodb-sdk.tgz /tmp/nocodb-sdk.tgz
+
+# Replace workspace reference with tarball reference and configure pnpm
+RUN sed -i 's|"nocodb-sdk": "workspace:\^"|"nocodb-sdk": "file:/tmp/nocodb-sdk.tgz"|g' package.json \
+    && echo "node-linker=hoisted" > .npmrc
 
 # Install production dependencies, reduce node_modules size with modclean,
 # and remove sqlite deps
@@ -112,7 +119,7 @@ COPY --link --from=builder /usr/src/monorepo/packages/nocodb/docker/litestream.y
 # Copy production node_modules
 COPY --link --from=prod-deps /usr/src/app/node_modules ./node_modules
 
-# Copy package.json
+# Copy package.json (use original from builder, not the modified one from prod-deps)
 COPY --link --from=builder /usr/src/monorepo/packages/nocodb/package.json ./package.json
 
 # Copy built main.js bundle
